@@ -1,2 +1,8 @@
 # cs-6474-social-computing
 This repository contains work for hte CS 6474 Social Computing Spring 2022 course at Georgia Tech.
+
+Client Secret: RCt6rBtfD_MJF1AyL8d7r0poD3nU7850-ca8S1YWSqFY8Zs0eZPqfSO5dnsftCm0_qTsjGps_Wc1oMje0zXXoA
+
+Client ID: RCt6rBtfD_MJF1AyL8d7r0poD3nU7850-ca8S1YWSqFY8Zs0eZPqfSO5dnsftCm0_qTsjGps_Wc1oMje0zXXoA
+
+Access Token: fy5Euld5EprBP9MvP_d75uTnZQ75v80sJhHbbR6GhikFLv_RMs8YIr-vvfosxOQK
