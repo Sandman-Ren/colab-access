@@ -1,3 +1,4 @@
+import abc
 import time
 import urllib
 from typing import Dict, Union, List, Tuple
@@ -26,6 +27,18 @@ class Token:
 class SpotifyClientCredentialsToken(Token):
     AUTH_BODY = parse.urlencode([('grant_type', 'client_credentials')]).encode()
     SPOTIFY_SEARCH_ENDPOINT = r'/search'
+
+    @staticmethod
+    def from_json_file(file: Path) -> "SpotifyClientCredentialsToken":
+        attributes: Dict = json.load(file.open('r'))
+        token: SpotifyClientCredentialsToken
+        try:
+            client_id = attributes['client_id']
+            client_secret = attributes['client_secret']
+            token = SpotifyClientCredentialsToken(client_id, client_secret)
+        except KeyError:
+            raise ValueError("Expect field client_id and client_secret to be both present in the file.")
+        return token
 
     def __init__(self, client_id: str = None, client_secret: str = None, lazy_initialize=True):
 
