@@ -1,7 +1,7 @@
 import abc
 import time
 import urllib
-from typing import Dict, Union, List, Tuple
+from typing import Dict, Union, List, Tuple, Any
 from urllib import request, parse
 
 import os
@@ -20,22 +20,42 @@ SPOTIFY_API_BASE_URL = r'https://api.spotify.com/v1'
 SPOTIFY_OAUTH2_URL = r'https://accounts.spotify.com/api/token'
 
 
-class Token:
+class JWTToken:
     pass
 
 
-class SpotifyClientCredentialsToken(Token):
+class ClientCredentialsJWTToken(JWTToken):
+
+    @abc.abstractmethod
+    def __init__(self, client_id: str = None, client_secret: str = None):
+        self.client_id = client_id
+        self.client_secret = client_secret
+
+    @staticmethod
+    def from_json_file(file: Path) -> "ClientCredentialsJWTToken":
+        attributes: Dict = json.load(file.open('r'))
+        token: ClientCredentialsJWTToken
+        try:
+            client_id = attributes['client_id']
+            client_secret = attributes['client_secret']
+            token = ClientCredentialsJWTToken(client_id, client_secret)
+        except KeyError:
+            raise ValueError("Expect field client_id and client_secret to be both present in the file.")
+        return token
+
+
+class SpotifyClientCredentialsJWTToken(JWTToken):
     AUTH_BODY = parse.urlencode([('grant_type', 'client_credentials')]).encode()
     SPOTIFY_SEARCH_ENDPOINT = r'/search'
 
     @staticmethod
-    def from_json_file(file: Path) -> "SpotifyClientCredentialsToken":
+    def from_json_file(file: Path) -> "SpotifyClientCredentialsJWTToken":
         attributes: Dict = json.load(file.open('r'))
-        token: SpotifyClientCredentialsToken
+        token: SpotifyClientCredentialsJWTToken
         try:
             client_id = attributes['client_id']
             client_secret = attributes['client_secret']
-            token = SpotifyClientCredentialsToken(client_id, client_secret)
+            token = SpotifyClientCredentialsJWTToken(client_id, client_secret)
         except KeyError:
             raise ValueError("Expect field client_id and client_secret to be both present in the file.")
         return token
@@ -44,12 +64,12 @@ class SpotifyClientCredentialsToken(Token):
 
         if client_id is None:
             try:
-                client_id = os.environ['CLIENT_ID']
+                client_id = os.environ['SPOTIFY_CLIENT_ID']
             except KeyError:
                 raise Exception("You must specify client_id as an argument or set the CLIENT_ID environment variable.")
 
             try:
-                client_secret = os.environ['CLIENT_SECRET']
+                client_secret = os.environ['SPOTIFY_CLIENT_SECRET']
             except KeyError:
                 raise Exception(
                     "You must specify client_secret as an agrument or set the CLIENT_SECRET environment variable.")
@@ -78,7 +98,7 @@ class SpotifyClientCredentialsToken(Token):
 
     def _get_auth_token(self):
         auth_header = self._assemble_oauth2_header()
-        req = request.Request(SPOTIFY_OAUTH2_URL, data=SpotifyClientCredentialsToken.AUTH_BODY, headers=auth_header,
+        req = request.Request(SPOTIFY_OAUTH2_URL, data=SpotifyClientCredentialsJWTToken.AUTH_BODY, headers=auth_header,
                               method='POST')
         response = request.urlopen(req)
         return json.load(response)
@@ -93,8 +113,24 @@ class SpotifyClientCredentialsToken(Token):
         }
 
 
-class Any:
-    pass
+class GeniusClientCredentialsJWTToken(JWTToken):
+    BASE_URL = r'https://api.genius.com/oauth/authorize'
+
+    def __init__(self, client_id: str = None, client_secret: str = None, lazy_init=False):
+        if client_id is None:
+            try:
+                client_id = os.environ['GENIUS_CLIENT_ID']
+            except KeyError:
+                raise Exception(
+                    "You must specify client_id as an argument or set the GENIUS_CLIENT_ID environment variable.")
+        if client_secret is None:
+            try:
+                client_secret = os.environ['GENIUS_CLIENT_SECRET']
+            except KeyError:
+                raise Exception(
+                    "You must specify client_secret as an argument or set the GENIUS_CLIENT_SECRET environment variable.")
+        self.client_id = client_id
+        self.client_secret = client_secret
 
 
 class SpotifySearchCrawler(scrapy.Spider):
@@ -117,7 +153,7 @@ class SpotifySearchCrawler(scrapy.Spider):
 
         self.client_id = client_id
         self.client_secret = client_secret
-        self.token = SpotifyClientCredentialsToken(client_id, client_secret)
+        self.token = SpotifyClientCredentialsJWTToken(client_id, client_secret)
 
         self.output_dir = Path.cwd() / f'crawler-{self.name}-output'
         if not self.output_dir.exists():
@@ -146,6 +182,91 @@ class SpotifySearchCrawler(scrapy.Spider):
 
     def parse(self, response: scrapy.http.TextResponse, **kwargs):
         searched_tracks: dict = response.json()['tracks']
+        yield searched_tracks
+        if 'next' in searched_tracks:
+            yield self.get_authorized_request(url=searched_tracks['next'], callback=self.parse)
+
+    def get_authorized_request(self, url, callback=None) -> scrapy.Request:
+
+        authorized_header = self.token.get_authorized_header()
+        authorized_header['Content-Type'] = 'application/json'
+        return scrapy.Request(url=url, headers=authorized_header, callback=callback)
+
+
+class LyricsProvider(abc.ABC):
+    @abc.abstractmethod
+    def get_lyrics(self):
+        pass
+
+
+class GeniusLyricsProvider(LyricsProvider):
+
+    def _search_by_song_name_artist_name(self, song_name: str, artist_name: str):
+        pass
+
+    def get_lyrics(self):
+        pass
+
+
+class SpotifySearchCrawlerWithLyrics(scrapy.Spider):
+    name: str = "SpotifySearchCrawlerWithLyrics"
+
+    def __init__(self, client_id: str, client_secret: str, **kwargs):
+        super().__init__(**kwargs)
+
+        if client_id is None:
+            try:
+                client_id = os.environ['CLIENT_ID']
+            except KeyError:
+                raise Exception("You must specify client_id as an argument or set the CLIENT_ID environment variable.")
+
+            try:
+                client_secret = os.environ['CLIENT_SECRET']
+            except KeyError:
+                raise Exception(
+                    "You must specify client_secret as an agrument or set the CLIENT_SECRET environment variable.")
+
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.token = SpotifyClientCredentialsJWTToken(client_id, client_secret)
+
+        self.output_dir = Path.cwd() / f'crawler-{self.name}-with_lyrics-output'
+        if not self.output_dir.exists():
+            self.output_dir.mkdir()
+
+    def start_requests(self):
+        search_type = 'track'
+        target_genre = 'hip-hop'
+        target_year = ['2019', '2020', '2021', '2022']
+        pagination_limit = 50
+
+        # assemble the starting url
+        for year in target_year:
+            query_string = parse.urlencode([
+                ('q', f'genre:{target_genre} year:{year}'),
+                ('type', search_type),
+                ('market', 'US'),
+                ('limit', pagination_limit),
+                ('offset', 0)
+            ])
+            search_url = f'{SPOTIFY_API_BASE_URL}/search?{query_string}'
+
+            self.logger.info(f'Search URL: {search_url}')
+
+            yield self.get_authorized_request(search_url, callback=self.parse)
+
+    def _populate_track_with_lyrics(self, response: scrapy.http.TextResponse, track: Dict[str, Any]):
+        track['lyrics'] = response.json()['lyrics']
+
+    def parse(self, response: scrapy.http.TextResponse, **kwargs):
+        searched_tracks: dict = response.json()['tracks']
+        for track in searched_tracks['items']:
+            first_artist = track['artists'][0]['name']
+            song_name = track['name']
+            # query the third party endpoint for lyrics
+            endpoint = f"{parse.quote(first_artist)}/{parse.quote(song_name)}"
+            resource = f'{THIRD_PARTY_LYRICS_BASE_URL}/{endpoint}'
+            yield scrapy.Request(resource, callback=self._populate_track_with_lyrics, cb_kwargs={'track': track})
         yield searched_tracks
         if 'next' in searched_tracks:
             yield self.get_authorized_request(url=searched_tracks['next'], callback=self.parse)
@@ -198,6 +319,8 @@ if __name__ == '__main__':
         'LOG_LEVEL': "INFO"
     })
     print(vars(crawler_process.settings))
-    crawler_process.crawl(SpotifySearchCrawler, client_id='41d11c64c99f4295b22b262d02a041ff',
+    crawler_process.crawl(SpotifySearchCrawlerWithLyrics, client_id='41d11c64c99f4295b22b262d02a041ff',
                           client_secret='33c03b29679c45ada65a04e65f8b98f2')
     crawler_process.start()
+
+    # load
