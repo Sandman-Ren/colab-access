@@ -13,8 +13,14 @@ import base64
 
 import json
 
+import lyricsgenius
+import lyricsgenius.types
 import scrapy
 import scrapy.crawler
+
+import unicodedata
+
+import multiprocessing
 
 SPOTIFY_API_BASE_URL = r'https://api.spotify.com/v1'
 SPOTIFY_OAUTH2_URL = r'https://accounts.spotify.com/api/token'
@@ -43,8 +49,12 @@ class ClientCredentialsJWTToken(JWTToken):
             raise ValueError("Expect field client_id and client_secret to be both present in the file.")
         return token
 
+    @abc.abstractmethod
+    def get_authorized_header(self) -> Dict[str, str]:
+        pass
 
-class SpotifyClientCredentialsJWTToken(JWTToken):
+
+class SpotifyClientCredentialsJWTToken(ClientCredentialsJWTToken):
     AUTH_BODY = parse.urlencode([('grant_type', 'client_credentials')]).encode()
     SPOTIFY_SEARCH_ENDPOINT = r'/search'
 
@@ -113,24 +123,28 @@ class SpotifyClientCredentialsJWTToken(JWTToken):
         }
 
 
-class GeniusClientCredentialsJWTToken(JWTToken):
-    BASE_URL = r'https://api.genius.com/oauth/authorize'
+class GeniusClientCredentialsJWTToken(ClientCredentialsJWTToken):
 
-    def __init__(self, client_id: str = None, client_secret: str = None, lazy_init=False):
-        if client_id is None:
+    @staticmethod
+    def from_json_file(file: Path) -> "GeniusClientCredentialsJWTToken":
+        attributes = json.load(file.open('r'))
+        try:
+            token = attributes['token']
+        except KeyError:
+            raise ValueError("Expect field token in to be present in the file.")
+        return GeniusClientCredentialsJWTToken(token=token)
+
+    def __init__(self, client_id: str = None, client_secret: str = None, token: str = None):
+        if token is None:
             try:
-                client_id = os.environ['GENIUS_CLIENT_ID']
+                token = os.environ['GENIUS_TOKEN']
             except KeyError:
-                raise Exception(
-                    "You must specify client_id as an argument or set the GENIUS_CLIENT_ID environment variable.")
-        if client_secret is None:
-            try:
-                client_secret = os.environ['GENIUS_CLIENT_SECRET']
-            except KeyError:
-                raise Exception(
-                    "You must specify client_secret as an argument or set the GENIUS_CLIENT_SECRET environment variable.")
-        self.client_id = client_id
-        self.client_secret = client_secret
+                raise ValueError(
+                    "You must set genius api token as an argument or as an environment variable GENIUS_TOKEN")
+        self.token = token
+
+    def get_authorized_header(self) -> Dict[str, str]:
+        return {'Authorization': f'Bearer {self.token}'}
 
 
 class SpotifySearchCrawler(scrapy.Spider):
@@ -201,34 +215,62 @@ class LyricsProvider(abc.ABC):
 
 class GeniusLyricsProvider(LyricsProvider):
 
-    def _search_by_song_name_artist_name(self, song_name: str, artist_name: str):
-        pass
+    LYRICS_NOT_FOUND = '<LYRICS NOT FOUND>'
 
-    def get_lyrics(self):
-        pass
+    def __init__(self, token: str = None, token_file: Path = None):
+
+        self.token: GeniusClientCredentialsJWTToken
+        self.lyrics_provider: lyricsgenius.Genius
+        if token is None:
+            if token_file is None:
+                raise ValueError("You must specify either a token or a JSON file that contains the Genius API token.")
+            else:
+                self.token = GeniusClientCredentialsJWTToken.from_json_file(token_file)
+        else:
+            self.token = GeniusClientCredentialsJWTToken(token=token)
+        self.lyrics_provider = lyricsgenius.Genius(self.token.token)
+        # set up the lyrics provider
+        self.lyrics_provider.verbose = False
+        self.lyrics_provider.remove_section_headers = True
+        self.lyrics_provider.retries = 3
+
+    def _search_by_song_name_artist_name(self, song_name: str, artist_name: str) -> str:
+        song: lyricsgenius.types.Song = self.lyrics_provider.search_song(song_name, artist=artist_name)
+        if song is None:
+            print(f'Lyrics for song: {song_name} by {artist_name} is not found!')
+            return GeniusLyricsProvider.LYRICS_NOT_FOUND
+        if song.title != song_name or song.artist != artist_name:
+            print(
+                f'Expected song name: {song_name}, actual: {song.title}\tExpected artist name: {artist_name}, actual: {song.artist}')
+        lyrics = song.lyrics
+        return lyrics
+
+    def get_lyrics(self, song_name: str, artist_name: str):
+        return self._search_by_song_name_artist_name(song_name, artist_name)
 
 
 class SpotifySearchCrawlerWithLyrics(scrapy.Spider):
     name: str = "SpotifySearchCrawlerWithLyrics"
 
-    def __init__(self, client_id: str, client_secret: str, **kwargs):
+    def __init__(self, spotify_client_id: str, spotify_client_secret: str, genius_api_token: str, **kwargs):
         super().__init__(**kwargs)
-
-        if client_id is None:
+        if spotify_client_id is None:
             try:
-                client_id = os.environ['CLIENT_ID']
+                spotify_client_id = os.environ['CLIENT_ID']
             except KeyError:
                 raise Exception("You must specify client_id as an argument or set the CLIENT_ID environment variable.")
 
             try:
-                client_secret = os.environ['CLIENT_SECRET']
+                spotify_client_secret = os.environ['CLIENT_SECRET']
             except KeyError:
                 raise Exception(
                     "You must specify client_secret as an agrument or set the CLIENT_SECRET environment variable.")
 
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.token = SpotifyClientCredentialsJWTToken(client_id, client_secret)
+        self.client_id = spotify_client_id
+        self.client_secret = spotify_client_secret
+        self.spotify_token = SpotifyClientCredentialsJWTToken(spotify_client_id, spotify_client_secret)
+        self.genius_token = GeniusClientCredentialsJWTToken(token=genius_api_token)
+        self.lyrics_provider = GeniusLyricsProvider(self.genius_token.token)
 
         self.output_dir = Path.cwd() / f'crawler-{self.name}-with_lyrics-output'
         if not self.output_dir.exists():
@@ -260,23 +302,29 @@ class SpotifySearchCrawlerWithLyrics(scrapy.Spider):
 
     def parse(self, response: scrapy.http.TextResponse, **kwargs):
         searched_tracks: dict = response.json()['tracks']
-        for track in searched_tracks['items']:
-            first_artist = track['artists'][0]['name']
-            song_name = track['name']
-            # query the third party endpoint for lyrics
-            endpoint = f"{parse.quote(first_artist)}/{parse.quote(song_name)}"
-            resource = f'{THIRD_PARTY_LYRICS_BASE_URL}/{endpoint}'
-            yield scrapy.Request(resource, callback=self._populate_track_with_lyrics, cb_kwargs={'track': track})
+        # search lyrics in the item pipeline
         yield searched_tracks
         if 'next' in searched_tracks:
             yield self.get_authorized_request(url=searched_tracks['next'], callback=self.parse)
 
     def get_authorized_request(self, url, callback=None) -> scrapy.Request:
 
-        authorized_header = self.token.get_authorized_header()
+        authorized_header = self.spotify_token.get_authorized_header()
         authorized_header['Content-Type'] = 'application/json'
         return scrapy.Request(url=url, headers=authorized_header, callback=callback)
 
+
+# class SearchedTrackLyricsItemPipeline:
+#     def __init__(self):
+#         self.spider = None
+#         self.logger = None
+#
+#     def open_spider(self, spider: scrapy.Spider):
+#         self.spider = spider
+#         self.logger = spider.logger
+#
+#     def process_item(self, item: Dict[str, Union[str, Any]], spider: scrapy.Spider):
+#         #
 
 class SearchedTrackItemPipeline:
     """
@@ -287,20 +335,31 @@ class SearchedTrackItemPipeline:
         self.output_dir = None
         self.logger = None
 
+    def _populate_song_lyrics(self, track: Dict[str, Any], lyrics_provider: GeniusLyricsProvider):
+        first_artist = track['artists'][0]['name']
+        song_name = track['name']
+        self.logger.info(f'Populating lyrics for song: {song_name} by artist: {first_artist}')
+        lyrics = lyrics_provider.get_lyrics(song_name, first_artist)
+        if lyrics == GeniusLyricsProvider.LYRICS_NOT_FOUND:
+            self.logger.info(f'Lyrics for song: {song_name} by artist: {first_artist} is not found!')
+        track['lyrics'] = lyrics_provider.get_lyrics(song_name, first_artist)
+
     def open_spider(self, spider: scrapy.Spider):
         # set the output directory based on the information
         self.output_dir: Path = getattr(spider, 'output_dir')
         self.logger = spider.logger
         self.logger.info(f'SearchedTrackItemPipeline output directory: {self.output_dir}')
 
-    def process_item(self, item: Dict[str, Union[str, Any]], spider: scrapy.Spider) -> Dict[str, Any]:
+    def process_item(self, item: Dict[str, Union[str, Any]], spider: SpotifySearchCrawlerWithLyrics) -> Dict[str, Any]:
         self.logger.info(f'Processing item: {item["href"]}')
         # collect some metadata to store these objects
         href: str = item['href']
         parsed_href = parse.urlparse(href)
         query_parameters = parsed_href.query  # we will use this as the filename
 
-        tracks = item['items']
+        tracks: List[Dict[str, Any]] = item['items']
+        for t in tracks:
+            self._populate_song_lyrics(t, spider.lyrics_provider)
 
         # write to file
         output_filename: Path = self.output_dir / f'{query_parameters}.json'
@@ -319,8 +378,8 @@ if __name__ == '__main__':
         'LOG_LEVEL': "INFO"
     })
     print(vars(crawler_process.settings))
-    crawler_process.crawl(SpotifySearchCrawlerWithLyrics, client_id='41d11c64c99f4295b22b262d02a041ff',
-                          client_secret='33c03b29679c45ada65a04e65f8b98f2')
+    crawler_process.crawl(SpotifySearchCrawlerWithLyrics, spotify_client_id='41d11c64c99f4295b22b262d02a041ff',
+                          spotify_client_secret='33c03b29679c45ada65a04e65f8b98f2', genius_api_token='_0gkLXiRroGqnGmT2B-Sb6iVUxDxNqMGQtx3K5GSRCzU0AxcpY6orgYsHkE5pkZc')
     crawler_process.start()
 
     # load
