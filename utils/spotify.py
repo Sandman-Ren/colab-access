@@ -231,7 +231,8 @@ class SpotifySearchCrawlerWithLyrics(scrapy.Spider):
 
     LYRICS_NOT_FOUND = '<LYRICS-NOT-FOUND>'
 
-    def __init__(self, spotify_client_id: str, spotify_client_secret: str, genius_api_token: str, **kwargs):
+    def __init__(self, spotify_client_id: str, spotify_client_secret: str, genius_api_token: str, exact: bool = False,
+                 **kwargs):
         super().__init__(**kwargs)
         if spotify_client_id is None:
             try:
@@ -249,7 +250,7 @@ class SpotifySearchCrawlerWithLyrics(scrapy.Spider):
         self.client_secret = spotify_client_secret
         self.spotify_token = SpotifyClientCredentialsJWTToken(spotify_client_id, spotify_client_secret)
         self.genius_token = GeniusAPIJWTToken(token=genius_api_token)
-
+        self.require_exact = exact
         self.output_dir = Path.cwd() / f'crawler-{self.name}-with_lyrics-output'
         if not self.output_dir.exists():
             self.output_dir.mkdir()
@@ -295,7 +296,7 @@ class SpotifySearchCrawlerWithLyrics(scrapy.Spider):
                                  callback=self.parse_lyrics_search_result, cb_kwargs={
                     "song_name": song_name,
                     "artist_name": first_artist,
-                    "exact": True,
+                    "exact": self.require_exact,
                     "track": track
                 })
 
@@ -316,14 +317,23 @@ class SpotifySearchCrawlerWithLyrics(scrapy.Spider):
                 if not exact or artist_name_lower in song_data['artist_names'].lower() and song_name_lower in song_data[
                     'title'].lower():
                     yield scrapy.Request(f'{GENIUS_BASE_URL}{song_data["path"]}',
-                                         callback=self.populate_song_lyrics, cb_kwargs={"track": track})
+                                         callback=self.populate_song_lyrics, cb_kwargs={
+                            "track": track,
+                            "lyrics_artist_name": song_data['artist_names'],
+                            "lyrics_song_name": song_data['title']
+                        })
         track['lyrics'] = SpotifySearchCrawlerWithLyrics.LYRICS_NOT_FOUND
+        track['lyrics-song-name'] = SpotifySearchCrawlerWithLyrics.LYRICS_NOT_FOUND
+        track['lyrics-artist-name'] = SpotifySearchCrawlerWithLyrics.LYRICS_NOT_FOUND
         self.logger.info(f"Lyrics not found for song: {song_name}\tartist: {artist_name}")
 
-    def populate_song_lyrics(self, response: scrapy.http.HtmlResponse, track: Dict[str, Any]):
+    def populate_song_lyrics(self, response: scrapy.http.HtmlResponse, lyrics_song_name: str, lyrics_artist_name: str,
+                             track: Dict[str, Any]):
         lyrics_sections = response.css('div[data-lyrics-container="true"] a > span::text').getall()
         lyrics = ''.join(lyrics_sections)
         track['lyrics'] = lyrics
+        track['lyrics-song-name'] = lyrics_song_name
+        track['lyrics-artist-name'] = lyrics_artist_name
         yield track
 
     def get_authorized_request(self, url, callback=None) -> scrapy.Request:
@@ -390,7 +400,8 @@ if __name__ == '__main__':
     print(vars(crawler_process.settings))
     crawler_process.crawl(SpotifySearchCrawlerWithLyrics, spotify_client_id='41d11c64c99f4295b22b262d02a041ff',
                           spotify_client_secret='33c03b29679c45ada65a04e65f8b98f2',
-                          genius_api_token='_0gkLXiRroGqnGmT2B-Sb6iVUxDxNqMGQtx3K5GSRCzU0AxcpY6orgYsHkE5pkZc')
+                          genius_api_token='kmmbgInH9WZwPAZJDBK77GG23U7LzMQntci4SqLqU10WcuBdmmi-kB5SYHLbnvK7',
+                          exact=False)
     crawler_process.start()
 
     # load
